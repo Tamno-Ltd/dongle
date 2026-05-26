@@ -1,0 +1,30 @@
+# Build output
+build*/
+
+# West workspace metadata if this app is used as a local manifest.
+.west/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python/west
+__pycache__/
+*.pyc
+.venv/
+
+# Compilation artifacts if any leak out of build/
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
