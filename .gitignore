@@ -21,6 +21,9 @@ __pycache__/
 *.pyc
 .venv/
 
+# Local agent/tool state
+.omc/
+
 # Compilation artifacts if any leak out of build/
 *.o
 *.a
