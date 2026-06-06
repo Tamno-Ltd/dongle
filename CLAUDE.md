@@ -143,7 +143,7 @@ Note this is in the cpurad RAM region (`0x23000000`) and differs from a cpuapp i
 
 In SEGGER RTT Viewer or RTT Client:
 
-- Use manual RTT control block address: `0x2F001010`
+- Use manual RTT control block address: `0x23001010`
 - Use terminal/up-buffer 0.
 
 Do not treat this as permanent if linker settings, RTT buffer sizes, memory regions, or board target change. Recompute it after relevant build changes:
