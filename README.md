@@ -8,7 +8,7 @@ firmware development path.
 ## What it does
 
 - Starts the HF clock (nRF54H20 `CLOCK_CONTROL_NRF2` path).
-- Initializes ESB in PRX mode: DPL, 2 Mbps, 16-bit CRC, selective auto-ack.
+- Initializes ESB in PRX mode: DPL, 4 Mbps, 16-bit CRC, selective auto-ack, fast ramp-up.
 - Listens on RF channel 70 (pairs with the tempo cpurad PTX) with the shared default addresses.
 - Prints each received payload (length, pipe, RSSI, hex dump) and a once-per-
   second `alive: total_rx=...` heartbeat over RTT.
@@ -67,11 +67,11 @@ Expected output once a transmitter is sending:
 ```text
 Dongle ESB receiver starting
 HF clock started
-ESB PRX ready: 2 Mbps DPL, ch=70, fast-ramp=0
+ESB PRX ready: 4 Mbps DPL, ch=70, fast-ramp=1
 Listening for ESB packets on channel 70...
-RX pipe=0 len=8 rssi=-42
+RX pipe=0 len=8 rssi=-59
 payload
-                01 00 03 04 05 06 07 08  |........
+                54 58 00 de ad be ef 00  |TX......
 alive: total_rx=10 (+10/s)
 ```
 
@@ -104,10 +104,28 @@ tempo radio app, so only the **RF channel** has to match the sender.
 |------------------|--------------------------------------------------|
 | protocol         | `ESB_PROTOCOL_ESB_DPL` (dynamic payload length)  |
 | mode             | `ESB_MODE_PRX` (receiver)                         |
-| bitrate          | `ESB_BITRATE_2MBPS`                               |
+| bitrate          | `ESB_BITRATE_4MBPS`                              |
 | crc              | `ESB_CRC_16BIT`                                   |
+| fast ramp-up     | `CONFIG_ESB_FAST_SWITCHING=y` (40 us ramp)       |
 | RF channel       | `70` (`DONGLE_ESB_CHANNEL` in `src/main.c`)       |
 | base address 0   | `E7 E7 E7 E7`                                     |
 | base address 1   | `C2 C2 C2 C2`                                     |
 | address prefixes | `E7 C2 C3 C4 C5 C6 C7 C8`                         |
 | max payload      | `CONFIG_ESB_MAX_PAYLOAD_LENGTH=32`                |
+
+## Releases
+
+Pushing a tag matching `v*` triggers the **Release** GitHub Action
+(`.github/workflows/release.yml`), mirroring the tempo firmware release flow.
+It builds the cpurad receiver, guards against forbidden Bluetooth symbols,
+and publishes a GitHub Release with a `dongle-<tag>-firmware.zip` containing
+the flashable hexes (dongle app image, empty companion app-core image, and the
+generated UICR/BICR/periphconf).
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0 — ESB PRX receiver"
+git push origin v0.1.0
+```
+
+Flash a release build with `nrfutil`/`west` by programming the included hexes
+(app image + `empty_app_core` + `uicr`), exactly as `west flash` does locally.
