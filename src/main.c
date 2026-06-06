@@ -132,7 +132,7 @@ static int esb_initialize(void)
 
 	config.protocol           = ESB_PROTOCOL_ESB_DPL;
 	config.mode               = ESB_MODE_PRX;
-	config.bitrate            = ESB_BITRATE_2MBPS;
+	config.bitrate            = ESB_BITRATE_4MBPS;
 	config.crc                = ESB_CRC_16BIT;
 	config.event_handler      = event_handler;
 	config.selective_auto_ack = true;
@@ -168,7 +168,7 @@ static int esb_initialize(void)
 		return err;
 	}
 
-	LOG_INF("ESB PRX ready: 2 Mbps DPL, ch=%u, fast-ramp=%d",
+	LOG_INF("ESB PRX ready: 4 Mbps DPL, ch=%u, fast-ramp=%d",
 		DONGLE_ESB_CHANNEL, IS_ENABLED(CONFIG_ESB_FAST_SWITCHING));
 	return 0;
 }
