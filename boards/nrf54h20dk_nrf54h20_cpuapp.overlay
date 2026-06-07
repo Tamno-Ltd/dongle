@@ -1,0 +1,22 @@
+/*
+ * Dongle USB HID mouse — cpuapp overlay.
+ *
+ * Declares the HID device that the new USB device stack binds to. The USBHS
+ * controller (zephyr_udc0) is already enabled on cpuapp by the DK base DTS,
+ * and the cpuapp<->cpurad ICBMSG instance (cpuapp_cpurad_ipc) plus its
+ * bellboards are also provided by the DK base DTS, so no other nodes are
+ * needed here.
+ *
+ * Report layout (7 bytes): buttons[2] + X[2] + Y[2] + wheel[1], matching the
+ * dongle ESB on-air payload (include/dongle_ipc.h) and usb/usb_hid_report.h.
+ */
+
+/ {
+	hid_dev_0: hid_dev_0 {
+		compatible = "zephyr,hid-device";
+		label = "HID0";
+		protocol-code = "mouse";
+		in-polling-period-us = <125>;
+		in-report-size = <7>;
+	};
+};

@@ -1,0 +1,42 @@
+/*
+ * Dongle cpurad overlay — ESB radio (in the cpuapp+cpurad sysbuild).
+ *
+ * DK base DTS enables uart135/uart136 as cpurad debug consoles. Disable both:
+ * we run the radio core headless (prj.conf sets CONFIG_SERIAL=n) and releasing
+ * the nodes avoids PERIPHCONF/SPU pin-ownership conflicts with cpuapp.
+ */
+
+&uart135 {
+	status = "disabled";
+};
+
+&uart136 {
+	status = "disabled";
+};
+
+/ {
+	/* HMPAN-216 workaround: cpurad requests power-state changes from cpusys
+	 * via VEVIF mboxes. Required by the ESB driver init on nRF54H20.
+	 * Channels match the NCS esb samples and the tempo radio app.
+	 */
+	cpurad_cpusys_errata216_mboxes: errata216_mboxes {
+		compatible = "zephyr,mbox-ipm";
+		status = "okay";
+		mboxes = <&cpusys_vevif 0x14>, <&cpusys_vevif 0x15>;
+		mbox-names = "on_req", "off_req";
+	};
+};
+
+/*
+ * Radio<->timer event routing used by the ESB driver on nRF54H20.
+ *
+ * Unlike the standalone NCS esb_prx sample overlay, gpiote130 is NOT claimed
+ * here: the ESB subsystem uses no GPIOTE (only the DK LED/button demo does),
+ * and claiming gpiote130 on cpurad in a sysbuild risks a PERIPHCONF conflict.
+ * ESB needs only dppic020 + the errata216 mboxes (matches the tempo radio app).
+ */
+&dppic020 {
+	status = "okay";
+	source-channels = <0 1 2 3 4 5>;
+	sink-channels = <6 7 8 9 10 11>;
+};

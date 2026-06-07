@@ -1,27 +1,58 @@
 # Claude Handoff
 
-This repo is a minimal Nordic Connect SDK / Zephyr application for the Tamno dongle target. It was created as a standalone NCS v3.2.3 project with RTT logging configured to match the existing Tempo firmware development workflow.
+This repo is a Nordic Connect SDK / Zephyr application for the Tamno dongle
+(nRF54H20 DK target). It is a **wireless ESB → USB HID mouse**: it receives
+mouse-movement packets over Enhanced ShockBurst and replays them to the host PC
+as USB HID input reports, so the dongle enumerates in Windows Device Manager as
+a HID-compliant mouse and moves the cursor.
 
-It now runs on the nRF54H20 **radio core (`cpurad`)** as an Enhanced ShockBurst (ESB) **receiver (PRX)** that prints every received packet over RTT. The original cpuapp hello-world is preserved in git history (commit `00a5351`).
+```
+remote PTX  --ESB 4 Mbps-->  cpurad (PRX)  --ICBMSG IPC-->  cpuapp (USB HID)  --USB-->  PC
+```
+
+History: started as a cpuapp hello-world (commit `00a5351`), became a standalone
+cpurad ESB PRX receiver, then was restructured into the current two-core sysbuild
+(cpuapp USB HID + cpurad ESB) to add the USB-mouse output path. The USB HID code
+is adapted from the tempo firmware (`C:\tamno\tempo\app\usb\`).
+
+## Architecture (why two cores)
+
+On the nRF54H20 the RADIO/ESB peripheral is on the **radio core (cpurad)** and
+the USB high-speed controller (`usbhs`) is on the **application core (cpuapp)** —
+it is hard-disabled on cpurad in the board DTS. A single-core image cannot do
+both, so this is a **sysbuild with two images**:
+
+- **cpuapp** = root app. Brings up USB HID, receives 7-byte mouse reports from
+  cpurad over the `cpuapp_cpurad_ipc` ICBMSG link, submits them to the host.
+  Owns SEGGER RTT logging.
+- **cpurad** = `radio/` image. ESB PRX receiver; forwards each payload to cpuapp
+  over IPC. Logs over its own SEGGER RTT channel (separate control block from
+  cpuapp; no UART console).
+
+cpuapp boots cpurad at runtime via `CONFIG_SOC_NRF54H20_CPURAD_ENABLE=y`. The
+ICBMSG instance + bellboards come from the DK base DTS (no overlay needed). The
+structure mirrors the NCS `spis_wakeup` sample and the tempo firmware. **No
+MCUboot** (receiver-only; deliberately omitted).
 
 ## Project Snapshot
 
 - Local path: `C:\tamno\dongle`
 - Git remote: `https://github.com/Tamno-Ltd/dongle.git`
 - Main branch: `main`
-- Initial pushed commit: `00a5351 Add dongle hello RTT app`
-- Purpose: receive ESB packets on `nrf54h20dk/nrf54h20/cpurad` and make the payloads visible through SEGGER RTT.
+- Purpose: receive ESB mouse packets on cpurad, replay them as a USB HID mouse
+  from cpuapp.
 
 ## Local SDK Context
 
-The machine has NCS v3.2.3 installed locally:
+NCS v3.2.3 installed locally:
 
 - SDK root: `C:\ncs\v3.2.3`
 - Zephyr base: `C:\ncs\v3.2.3\zephyr`
-- Toolchain bundle for v3.2.3: `C:\ncs\toolchains\fd21892d0f`
+- Toolchain bundle: `C:\ncs\toolchains\fd21892d0f`
 - Bundled `west.exe`: `C:\ncs\toolchains\fd21892d0f\opt\bin\Scripts\west.exe`
 
-Plain `cmd.exe` and plain PowerShell do not necessarily have `west` on `PATH`. Use the repo wrappers unless the shell was launched from the NCS toolchain environment.
+Plain `cmd.exe`/PowerShell do not necessarily have `west` on `PATH`. Use the repo
+wrappers unless the shell was launched from the NCS toolchain environment.
 
 ## Build And Flash
 
@@ -33,179 +64,181 @@ build.cmd
 flash.cmd
 ```
 
-Equivalent command if the NCS v3.2.3 environment is already loaded:
+Equivalent if the NCS v3.2.3 environment is already loaded:
 
 ```cmd
-west build -p -b nrf54h20dk/nrf54h20/cpurad -d build .
+west build -p -b nrf54h20dk/nrf54h20/cpuapp --sysbuild -d build .
 west flash -d build
 ```
 
-The wrapper scripts call `scripts\ncs-env.cmd`, which sets:
+> Build wrapper note: invoking `build.cmd` through git-bash needs MSYS arg
+> conversion disabled, e.g. `MSYS2_ARG_CONV_EXCL='*' cmd.exe /c 'C:\tamno\dongle\build.cmd'`
+> (otherwise git-bash rewrites `/c` to `C:\` and cmd just prints its banner).
+> From a real Command Prompt this is not an issue.
 
-- `NCS_ROOT=C:\ncs\v3.2.3`
-- `NCS_TOOLCHAIN_DIR=C:\ncs\toolchains\fd21892d0f`
-- `ZEPHYR_BASE=%NCS_ROOT%\zephyr`
-- `ZEPHYR_TOOLCHAIN_VARIANT=zephyr`
-- `ZEPHYR_SDK_INSTALL_DIR=%NCS_TOOLCHAIN_DIR%\opt\zephyr-sdk`
-- PATH entries needed for `west`, CMake, Python, nrfutil, and the Zephyr SDK toolchains.
+Build verified locally (pristine sysbuild, exit 0). Sysbuild domains / products:
 
-The build has been verified successfully (pristine `cpurad` build, exit 0, `src/main.c` compiles with no warnings). It uses sysbuild and creates at least these build products:
+- `build\dongle\zephyr\zephyr.hex` — cpuapp USB HID image (+ `bicr.hex`)
+- `build\remote_rad\zephyr\zephyr.hex` — cpurad ESB PRX image
+- `build\uicr\zephyr\uicr.hex` (+ `periphconf.hex`)
 
-- `build\dongle\zephyr\zephyr.elf` (the cpurad ESB receiver image)
-- `build\dongle\zephyr\zephyr.hex`
-- `build\uicr\zephyr\uicr.hex`
-
-Sysbuild also auto-adds an `empty_app_core` image (`build\empty_app_core\`) for the application core; it requires no maintenance and is programmed automatically by `west flash`. The only build warning is a generic `LTO ... assigned 'y' but got 'n'` from the NCS/MPSL build — benign.
+`west flash` programs all domains. The only build warning is the benign
+`Experimental symbol ESB_FAST_SWITCHING is enabled`. (Note: the old single-core
+build auto-added an `empty_app_core` image; the explicit `remote_rad` replaces
+it, so there is no `empty_app_core` anymore.)
 
 ## App Behavior
 
-Source: `src\main.c`
+### cpuapp — `src/main.c` (+ `usb/usb_hid.c`)
 
-At boot it starts the HF clock (nRF54H20 `CLOCK_CONTROL_NRF2` path), initializes ESB in PRX mode, and starts RX:
-
-```text
-Dongle ESB receiver starting
-HF clock started
-ESB PRX ready: 2 Mbps DPL, ch=70, fast-ramp=0
-Listening for ESB packets on channel 70...
-```
-
-For each received packet (in RADIO ISR context, via the ESB event handler) it logs the pipe, length, RSSI, and a hex dump of the payload:
+At boot: `dongle_usb_init()` (registers the HID report descriptor + VID/PID/
+strings on the new `usbd` stack), `dongle_usb_enable()`, then opens the
+`cpuapp_cpurad_ipc` ICBMSG endpoint `"dongle_mouse"`. Each received IPC message
+is decoded into `(dx, dy, buttons, wheel)` and submitted with
+`dongle_usb_submit_mouse_report()` (gated by `hid_ready`, so packets before host
+enumeration return `-EACCES` and are counted as dropped). Once per second logs
+`alive: hid_tx=N (+N/s) dropped=M` over RTT.
 
 ```text
-RX pipe=0 len=8 rssi=-42
-payload
-                01 00 03 04 05 06 07 08  |........
+Dongle USB HID mouse starting (cpuapp)
+USB HID mouse initialized (16-button, 16-bit X/Y)
+USB device enabled
+HID interface ready
+radio IPC endpoint bound
+alive: hid_tx=120 (+120/s) dropped=0
 ```
 
-Once per second it logs a heartbeat with the running RX count:
+VID `0x2fe3` / PID `0x0100`, manufacturer "Tamno", product "Tamno Dongle Mouse"
+(in `usb/usb_hid.c`). HID report descriptor: 16 buttons + 16-bit relative X/Y +
+8-bit wheel → **7-byte** report. FS and HS configs both registered.
+
+### cpurad — `radio/src/main.c`
+
+Starts the HF clock (`CLOCK_CONTROL_NRF2`), inits ESB in PRX mode, registers the
+`"dongle_mouse"` IPC endpoint, starts RX. The ESB event handler runs in RADIO
+ISR context, so it only `k_msgq_put`s each payload; a dedicated `ipc_tx_thread`
+waits for the cpuapp bind, then drains the queue and `ipc_service_send`s each
+report. Logs over its own SEGGER RTT control block (separate from cpuapp's;
+no UART console).
+
+## Report / On-air Format (canonical, 7 bytes)
+
+Used end to end (ESB payload → IPC → USB HID report). Defined in
+`include/dongle_ipc.h`; encoded/decoded in `usb/usb_hid_report.h`.
+
+| Bytes | Field   | Type        |
+|-------|---------|-------------|
+| 0-1   | buttons | `uint16` LE |
+| 2-3   | X delta | `int16`  LE |
+| 4-5   | Y delta | `int16`  LE |
+| 6     | wheel   | `int8`      |
+
+The IPC message wraps these 7 bytes: `struct dongle_ipc_mouse_report { uint8_t
+type (0x20); uint8_t len (7); uint8_t report[7]; }` (9 bytes, well under the
+32-byte ICBMSG block). **The remote transmitter must send exactly the 7-byte
+report layout** on channel 70 with the shared addresses.
+
+## Key Config
+
+cpuapp `prj.conf`:
 
 ```text
-alive: total_rx=10 (+10/s)
+CONFIG_USB_DEVICE_STACK_NEXT=y       # new usbd stack (required for USBHS)
+CONFIG_UDC_DWC2_DMA=n
+CONFIG_UDC_DWC2_USBHS_VBUS_READY_TIMEOUT=100
+CONFIG_UDC_BUF_POOL_SIZE=8192        # Windows MS-OS descriptor probe (wLength=4095)
+CONFIG_IPC_SERVICE=y                 # ICBMSG auto-selects (default y, needs MBOX + DT node)
+CONFIG_MBOX=y
+CONFIG_SOC_NRF54H20_CPURAD_ENABLE=y  # boot cpurad so the IPC binds
+CONFIG_LOG_BACKEND_RTT=y / CONFIG_USE_SEGGER_RTT=y / CONFIG_RTT_CONSOLE=y
 ```
 
-It uses both `LOG_INF()`/`LOG_HEXDUMP_INF()` and `printk()` so RTT logging and RTT console routing are both exercised.
+cpuapp DT: `boards/nrf54h20dk_nrf54h20_cpuapp.overlay` adds the
+`zephyr,hid-device` node (`in-report-size = <7>`). `zephyr_udc0` is already
+`okay` on cpuapp from the base DTS; no `chosen { zephyr,usbd }` is needed.
 
-ESB parameters (must match the transmitter): DPL, 2 Mbps, 16-bit CRC, selective auto-ack, RF channel `70` (`DONGLE_ESB_CHANNEL` in `src\main.c`, matching the tempo cpurad PTX), base addresses `E7E7E7E7` / `C2C2C2C2`, prefixes `E7 C2 C3 C4 C5 C6 C7 C8`. These addresses match the NCS `esb_ptx`/`esb_prx` samples and the tempo cpurad PTX. The NCS `esb_ptx` sample transmits on channel `2` — set `DONGLE_ESB_CHANNEL` to `2` to listen to it instead.
-
-## RTT Logging Configuration
-
-Source: `prj.conf`
-
-Relevant settings:
-
-```text
-CONFIG_ESB=y
-CONFIG_ESB_MAX_PAYLOAD_LENGTH=32
-CONFIG_CLOCK_CONTROL=y
-CONFIG_LOG=y
-CONFIG_LOG_DEFAULT_LEVEL=3
-CONFIG_LOG_BACKEND_RTT=y
-CONFIG_USE_SEGGER_RTT=y
-CONFIG_SEGGER_RTT_BUFFER_SIZE_UP=4096
-CONFIG_CONSOLE=y
-CONFIG_RTT_CONSOLE=y
-CONFIG_UART_CONSOLE=n
-CONFIG_PRINTK=y
-CONFIG_LOG_PRINTK=y
-CONFIG_BOOT_BANNER=n
-```
-
-The ESB radio core also needs board-scoped config and devicetree under `boards\`:
-
-- `boards\nrf54h20dk_nrf54h20_cpurad.conf`: `CONFIG_NRFX_GPPI_V1=n` (use the GPPI v0 path on nRF54H20, matching the NCS `esb_*` samples and tempo).
-- `boards\nrf54h20dk_nrf54h20_cpurad.overlay`: adds `errata216_mboxes` (HMPAN-216, required by ESB init on nRF54H20), plus `gpiote130` and `dppic020` (radio event routing, from the NCS `esb_prx` sample overlay).
-
-This mirrors Tempo's RTT development path:
-
-- `CONFIG_LOG_BACKEND_RTT=y`
-- `CONFIG_USE_SEGGER_RTT=y`
-- `CONFIG_SEGGER_RTT_BUFFER_SIZE_UP=4096`
-
-`CONFIG_RTT_CONSOLE=y` was added here so `printk()` also appears over RTT.
+cpurad `radio/prj.conf`: `CONFIG_ESB=y`, `CONFIG_ESB_FAST_SWITCHING=y`,
+`CONFIG_IPC_SERVICE=y` + `CONFIG_IPC_SERVICE_BACKEND_ICBMSG=y` + `CONFIG_MBOX=y`,
+plus its own RTT logging (`CONFIG_LOG_BACKEND_RTT=y`, `CONFIG_SERIAL=n`). Board:
+`radio/boards/
+nrf54h20dk_nrf54h20_cpurad.conf` (`CONFIG_NRFX_GPPI_V1=n`) and `.overlay`
+(errata216 mboxes + dppic020, uart135/136 disabled; **no** gpiote130 claim — the
+ESB subsystem needs no GPIOTE and claiming it on cpurad in a sysbuild risks a
+PERIPHCONF conflict). **No `CONFIG_ROM_START_OFFSET`** — that was a tempo MCUboot
+artifact and is not needed here (verified against the NCS `spis_wakeup` sample).
 
 ## Manual RTT Control Block Address
 
-SEGGER RTT auto-detect may fail on this target. For the current verified `cpurad` build, the RTT control block address is:
+Both cores log over their own SEGGER RTT control block. For the current verified
+build:
 
-```text
-0x23001010
-```
+| Core   | Image        | RAM region    | Control block |
+|--------|--------------|---------------|---------------|
+| cpuapp | `dongle`     | `0x2F000000`  | `0x2F001010`  |
+| cpurad | `remote_rad` | `0x23000000`  | `0x23001010`  |
 
-This came from `build\dongle\zephyr\zephyr.map`:
-
-```text
-0x0000000023000000 __rtt_buff_data_start = .
-0x0000000023001010 _SEGGER_RTT
-```
-
-Note this is in the cpurad RAM region (`0x23000000`) and differs from a cpuapp image (the original hello build had `0x2F001010`). Recompute it whenever the build's core target or memory layout changes.
-
-In SEGGER RTT Viewer or RTT Client:
-
-- Use manual RTT control block address: `0x23001010`
-- Use terminal/up-buffer 0.
-
-Do not treat this as permanent if linker settings, RTT buffer sizes, memory regions, or board target change. Recompute it after relevant build changes:
+In SEGGER RTT Viewer/Client: pick the address for the core you want, terminal/
+up-buffer 0. Recompute after any linker/RTT/memory/board-target change:
 
 ```cmd
 C:\ncs\toolchains\fd21892d0f\opt\zephyr-sdk\arm-zephyr-eabi\bin\arm-zephyr-eabi-nm.exe -n build\dongle\zephyr\zephyr.elf | findstr _SEGGER_RTT
+C:\ncs\toolchains\fd21892d0f\opt\zephyr-sdk\arm-zephyr-eabi\bin\arm-zephyr-eabi-nm.exe -n build\remote_rad\zephyr\zephyr.elf | findstr _SEGGER_RTT
 ```
-
-Or from the map:
-
-```cmd
-rg "_SEGGER_RTT|__rtt_buff_data_start" build\dongle\zephyr\zephyr.map
-```
-
-## Relationship To Tempo Firmware
-
-Tempo lives at `C:\tamno\tempo`. It is an existing NCS v3.2.3 firmware project for nRF54H20 and was used as the reference for RTT logging setup.
-
-Tempo context that matters here:
-
-- Tempo pins NCS with a `west.yml` revision of `v3.2.3`.
-- Tempo `CMakeLists.txt` checks for NCS 3.2.3 or newer patch version.
-- Tempo uses `CONFIG_LOG_BACKEND_RTT=y`, `CONFIG_USE_SEGGER_RTT=y`, and `CONFIG_SEGGER_RTT_BUFFER_SIZE_UP=4096`.
-
-The dongle app intentionally follows those patterns but stays minimal.
 
 ## Repo File Map
 
-- `CMakeLists.txt`: Zephyr app entry point, NCS v3.2.3 guard, adds `src/main.c`.
-- `prj.conf`: ESB, clock, RTT logging, and console configuration.
-- `src/main.c`: HF clock start, ESB PRX init, RX event handler that prints payloads over RTT.
-- `boards/nrf54h20dk_nrf54h20_cpurad.conf`: board-scoped ESB config (`CONFIG_NRFX_GPPI_V1=n`).
-- `boards/nrf54h20dk_nrf54h20_cpurad.overlay`: cpurad devicetree for ESB (errata216 mboxes, gpiote130, dppic020).
+- `sysbuild.cmake`: adds the `remote_rad` cpurad image (guarded by `SB_CONFIG_SOC_NRF54H20`).
+- `CMakeLists.txt` / `prj.conf`: cpuapp root app (USB HID + IPC).
+- `src/main.c`: cpuapp entry — USB init/enable + IPC receive → HID submit.
+- `usb/usb_hid.c`, `usb/usb_hid.h`, `usb/usb_hid_report.h`: USB HID mouse (new usbd stack), adapted from tempo.
+- `include/dongle_ipc.h`: shared cpuapp↔cpurad IPC contract (endpoint name, message struct, 7-byte layout).
+- `boards/nrf54h20dk_nrf54h20_cpuapp.overlay`: HID device node.
+- `radio/CMakeLists.txt`, `radio/prj.conf`: cpurad ESB PRX image.
+- `radio/src/main.c`: ESB PRX + ISR→msgq→IPC forwarding.
+- `radio/boards/nrf54h20dk_nrf54h20_cpurad.{conf,overlay}`: cpurad board config + devicetree.
 - `west.yml`: local manifest pinned to `sdk-nrf` `v3.2.3`.
-- `build.cmd`: plain-cmd build wrapper.
-- `flash.cmd`: plain-cmd flash wrapper.
-- `scripts\ncs-env.cmd`: local NCS v3.2.3 environment setup.
-- `README.md`: user-facing build, flash, and RTT instructions.
-- `.gitignore`: ignores build outputs, local west metadata, editor files, `.omc/`, and leaked binary artifacts.
+- `build.cmd` / `flash.cmd` / `scripts\ncs-env.cmd`: local NCS v3.2.3 wrappers.
+- `.github/workflows/release.yml`: tagged-build release (cpuapp+cpurad sysbuild).
+- `README.md`: user-facing build/flash/RTT/format docs.
+
+## Relationship To Tempo Firmware
+
+Tempo lives at `C:\tamno\tempo` (NCS v3.2.3, nRF54H20). It is the reference for:
+
+- The USB HID module (`app/usb/usb_hid.c` etc. — lifted and renamed `tempo_`→`dongle_`).
+- The cpuapp↔cpurad ICBMSG IPC pattern (`src/main.c`, `app/ipc/ipc_radio.h`).
+- RTT logging setup.
+
+Tempo's data flow is the **mirror** of the dongle's: tempo reads a sensor on
+cpuapp and transmits over ESB from cpurad (PTX); the dongle receives over ESB on
+cpurad (PRX) and outputs USB HID from cpuapp. Tempo also pins NCS to `v3.2.3` and
+guards the NCS version in `CMakeLists.txt`, which this repo follows. Tempo uses
+MCUboot; the dongle deliberately does not.
 
 ## Git And Hygiene
 
-Generated build output is intentionally ignored. Do not commit:
+Do not commit generated output: `build*\`, `.west\`, `.omc\`, and stray
+`.elf/.hex/.bin/.map/.o/.a`. The `.gitignore` covers these. `main` tracks
+`origin/main`.
 
-- `build\`
-- `.west\`
-- `.omc\`
-- generated `.elf`, `.hex`, `.bin`, `.map`, `.o`, `.a`
-
-The repo was pushed to GitHub and `main` tracks `origin/main`.
-
-Before changing firmware behavior, run:
+Before changing firmware behavior:
 
 ```cmd
 git status --short
 build.cmd
 ```
 
-After changing RTT config or memory layout, re-check the manual RTT control block address.
+After changing RTT config or memory layout, re-check the manual RTT control block
+address (cpuapp image).
 
 ## Known Assumptions
 
-- The target board is `nrf54h20dk/nrf54h20/cpurad` (the radio core, where the RADIO peripheral and ESB live).
-- Build was verified locally; flashing and live RTT output were not verified by Codex because that requires the physical board/debug connection.
-- If using an NCS toolchain install with a different bundle ID, set `NCS_TOOLCHAIN_DIR` before running `build.cmd` or edit `scripts\ncs-env.cmd`.
+- Board target is now `nrf54h20dk/nrf54h20/cpuapp` **with `--sysbuild`** (cpuapp
+  root + cpurad `remote_rad`). The old standalone `cpurad` target is gone.
+- This repo is **receiver only**. A matching ESB transmitter (PTX) that sends the
+  7-byte report layout on channel 70 is separate work. The tempo cpurad PTX sends
+  zeroed deltas today (proves the link, won't move the cursor).
+- Build was verified locally; flashing, USB enumeration, and live cursor movement
+  require the physical board + a real transmitter and were not hardware-verified.
+- If using an NCS toolchain bundle with a different ID, set `NCS_TOOLCHAIN_DIR`
+  before `build.cmd` or edit `scripts\ncs-env.cmd`.

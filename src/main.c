@@ -1,175 +1,131 @@
 /*
- * Dongle ESB PRX receiver (standalone nRF54H20 radio core / cpurad).
+ * Dongle USB HID mouse — cpuapp (application core).
  *
- * Receives Enhanced ShockBurst packets and prints each payload over RTT.
- * Pairs with a matching ESB transmitter (PTX) that uses the same addresses
- * and RF channel:
+ * Receives 7-byte mouse reports from the radio core (cpurad ESB PRX) over the
+ * cpuapp<->cpurad ICBMSG IPC link and submits them to the USB host as HID
+ * mouse input reports, so the dongle enumerates in Windows Device Manager as a
+ * HID-compliant mouse and moves the host cursor.
  *
- *   - NCS esb_ptx sample  -> RF channel 2  (set DONGLE_ESB_CHANNEL = 2)
- *   - tempo cpurad PTX    -> RF channel 70 (set DONGLE_ESB_CHANNEL = 70)
+ * Data flow:
+ *   remote PTX --ESB--> cpurad PRX --IPC(dongle_mouse)--> cpuapp --USB HID--> PC
  *
- * All three (this RX, the NCS PTX sample, the tempo PTX) share the same
- * default addresses, so only the channel has to match.
- *
- * ESB config: DPL (dynamic payload length), 2 Mbps, 16-bit CRC, pipe set by
- * the prefix table below, selective auto-ack on.
- *
- * The ESB event handler runs in RADIO ISR context. Zephyr deferred logging
- * is ISR-safe (it only enqueues), so logging the payload here is fine for a
- * bring-up receiver. If RX rate gets high, hand the payload to a thread
- * instead (see the tempo radio app for that pattern).
+ * The 7-byte report layout (buttons[2] LE + X[2] LE + Y[2] LE + wheel[1]) is
+ * the single canonical format end to end (see include/dongle_ipc.h and
+ * usb/usb_hid_report.h).
  */
+
+#include <string.h>
+#include <errno.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/drivers/clock_control.h>
-#include <zephyr/drivers/clock_control/nrf_clock_control.h>
+#include <zephyr/ipc/ipc_service.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/printk.h>
 
-#include <nrfx.h>
-#include <esb.h>
-#if defined(CONFIG_CLOCK_CONTROL_NRF2)
-#include <hal/nrf_lrcconf.h>
-#endif
+#include "usb/usb_hid.h"
+#include "dongle_ipc.h"
 
-LOG_MODULE_REGISTER(dongle_rx, LOG_LEVEL_INF);
+LOG_MODULE_REGISTER(dongle, LOG_LEVEL_INF);
 
-/* RF channel. Must match the transmitter. 70 = the tempo cpurad PTX
- * (TEMPO_ESB_CHANNEL). Use 2 to listen to the NCS esb_ptx sample instead
- * (it never calls esb_set_rf_channel, so it stays on
- * CONFIG_ESB_DEFAULT_RF_CHANNEL = 2).
- */
-#define DONGLE_ESB_CHANNEL 70
+/* ---- cpurad IPC link (ICBMSG, single named endpoint) ---- */
 
-/* Shared default addresses (identical in the NCS esb_ptx/esb_prx samples and
- * the tempo cpurad PTX). Must be identical on TX and RX.
- */
-static const uint8_t base_addr_0[4]   = {0xE7, 0xE7, 0xE7, 0xE7};
-static const uint8_t base_addr_1[4]   = {0xC2, 0xC2, 0xC2, 0xC2};
-static const uint8_t addr_prefixes[8] = {
-	0xE7, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8,
-};
+static K_SEM_DEFINE(radio_ipc_bound_sem, 0, 1);
+static struct ipc_ept radio_ep;
+static atomic_t reports_rx;
+static atomic_t reports_dropped;
 
-static struct esb_payload rx_payload;
-static atomic_t rx_count;
-
-static void event_handler(struct esb_evt const *event)
+static void radio_ipc_bound(void *priv)
 {
-	switch (event->evt_id) {
-	case ESB_EVENT_TX_SUCCESS:
-	case ESB_EVENT_TX_FAILED:
-		break;
-	case ESB_EVENT_RX_RECEIVED:
-		while (esb_read_rx_payload(&rx_payload) == 0) {
-			atomic_inc(&rx_count);
-			LOG_INF("RX pipe=%u len=%u rssi=%d",
-				rx_payload.pipe, rx_payload.length,
-				(int)rx_payload.rssi);
-			LOG_HEXDUMP_INF(rx_payload.data, rx_payload.length,
-					"payload");
+	ARG_UNUSED(priv);
+	k_sem_give(&radio_ipc_bound_sem);
+	LOG_INF("radio IPC endpoint bound");
+}
+
+static void radio_ipc_recv(const void *data, size_t len, void *priv)
+{
+	ARG_UNUSED(priv);
+
+	if (len < 1) {
+		return;
+	}
+
+	const uint8_t *raw = data;
+
+	if (raw[0] != DONGLE_IPC_MOUSE_REPORT) {
+		LOG_WRN("radio unknown IPC type=0x%02x len=%zu", raw[0], len);
+		return;
+	}
+
+	if (len < sizeof(struct dongle_ipc_mouse_report)) {
+		LOG_WRN("short mouse report len=%zu", len);
+		return;
+	}
+
+	struct dongle_ipc_mouse_report msg;
+
+	memcpy(&msg, data, sizeof(msg));
+
+	uint16_t buttons = sys_get_le16(&msg.report[0]);
+	int16_t  dx      = (int16_t)sys_get_le16(&msg.report[2]);
+	int16_t  dy      = (int16_t)sys_get_le16(&msg.report[4]);
+	int8_t   wheel   = (int8_t)msg.report[6];
+
+	int ret = dongle_usb_submit_mouse_report(dx, dy, buttons, wheel);
+
+	if (ret == 0) {
+		atomic_inc(&reports_rx);
+	} else {
+		/* -EACCES until the host enumerates the HID interface (no cable
+		 * / driver not bound yet) — expected, counted as a drop.
+		 */
+		atomic_inc(&reports_dropped);
+		if (ret != -EACCES) {
+			LOG_WRN("HID submit error: %d", ret);
 		}
-		break;
 	}
 }
 
-/* HF clock start. nRF54H20 uses the CLOCK_CONTROL_NRF2 driver; this is the
- * exact sequence used by the NCS esb_prx sample and the tempo cpurad app.
- */
-#if defined(CONFIG_CLOCK_CONTROL_NRF2)
-static int clocks_start(void)
+static int radio_ipc_init(void)
 {
-	int err;
-	int res;
-	const struct device *radio_clk_dev =
-		DEVICE_DT_GET_OR_NULL(DT_CLOCKS_CTLR(DT_NODELABEL(radio)));
-	struct onoff_client radio_cli;
+	const struct device *ipc_dev =
+		DEVICE_DT_GET(DT_NODELABEL(cpuapp_cpurad_ipc));
 
-	if (radio_clk_dev == NULL) {
-		LOG_ERR("radio clock controller not present in DT");
+	static struct ipc_ept_cfg cfg = {
+		.name = DONGLE_IPC_EPT_NAME,
+		.cb = {
+			.bound    = radio_ipc_bound,
+			.received = radio_ipc_recv,
+		},
+	};
+
+	if (!device_is_ready(ipc_dev)) {
+		LOG_ERR("cpurad ICBMSG instance not ready");
 		return -ENODEV;
 	}
 
-	/* Keep the radio power domain on to reduce wake latency. */
-	nrf_lrcconf_poweron_force_set(NRF_LRCCONF010,
-				      NRF_LRCCONF_POWER_DOMAIN_1, true);
+	int ret = ipc_service_open_instance(ipc_dev);
 
-	sys_notify_init_spinwait(&radio_cli.notify);
-
-	err = nrf_clock_control_request(radio_clk_dev, NULL, &radio_cli);
-	if (err < 0) {
-		LOG_ERR("nrf_clock_control_request: %d", err);
-		return err;
+	if (ret < 0 && ret != -EALREADY) {
+		LOG_ERR("ipc_service_open_instance: %d", ret);
+		return ret;
 	}
 
-	do {
-		err = sys_notify_fetch_result(&radio_cli.notify, &res);
-		if (!err && res) {
-			LOG_ERR("HF clock could not be started: %d", res);
-			return res;
-		}
-	} while (err == -EAGAIN);
-
-	/* HMPAN-84 errata: keep the LRCCONF clock running. */
-	if (nrf54h_errata_84()) {
-		nrf_lrcconf_clock_always_run_force_set(NRF_LRCCONF000, 0, true);
-		nrf_lrcconf_task_trigger(NRF_LRCCONF000,
-					 NRF_LRCCONF_TASK_CLKSTART_0);
+	ret = ipc_service_register_endpoint(ipc_dev, &radio_ep, &cfg);
+	if (ret < 0) {
+		LOG_ERR("ipc_service_register_endpoint: %d", ret);
+		return ret;
 	}
 
-	LOG_INF("HF clock started");
-	return 0;
-}
-#else
-#error "This app targets nRF54H20 cpurad (CONFIG_CLOCK_CONTROL_NRF2)."
-#endif
-
-static int esb_initialize(void)
-{
-	int err;
-	struct esb_config config = ESB_DEFAULT_CONFIG;
-
-	config.protocol           = ESB_PROTOCOL_ESB_DPL;
-	config.mode               = ESB_MODE_PRX;
-	config.bitrate            = ESB_BITRATE_4MBPS;
-	config.crc                = ESB_CRC_16BIT;
-	config.event_handler      = event_handler;
-	config.selective_auto_ack = true;
-	config.payload_length     = 32;
-
-	if (IS_ENABLED(CONFIG_ESB_FAST_SWITCHING)) {
-		config.use_fast_ramp_up = true;
+	ret = k_sem_take(&radio_ipc_bound_sem, K_SECONDS(10));
+	if (ret < 0) {
+		LOG_WRN("radio IPC bind timeout (cpurad link down)");
+		return ret;
 	}
 
-	err = esb_init(&config);
-	if (err) {
-		LOG_ERR("esb_init: %d", err);
-		return err;
-	}
-
-	err = esb_set_base_address_0(base_addr_0);
-	if (err) {
-		return err;
-	}
-
-	err = esb_set_base_address_1(base_addr_1);
-	if (err) {
-		return err;
-	}
-
-	err = esb_set_prefixes(addr_prefixes, ARRAY_SIZE(addr_prefixes));
-	if (err) {
-		return err;
-	}
-
-	err = esb_set_rf_channel(DONGLE_ESB_CHANNEL);
-	if (err) {
-		return err;
-	}
-
-	LOG_INF("ESB PRX ready: 4 Mbps DPL, ch=%u, fast-ramp=%d",
-		DONGLE_ESB_CHANNEL, IS_ENABLED(CONFIG_ESB_FAST_SWITCHING));
 	return 0;
 }
 
@@ -177,37 +133,38 @@ int main(void)
 {
 	int err;
 
-	LOG_INF("Dongle ESB receiver starting");
-	printk("Dongle ESB receiver starting (printk/RTT)\n");
+	LOG_INF("Dongle USB HID mouse starting (cpuapp)");
+	printk("Dongle USB HID mouse starting (printk/RTT)\n");
 
-	err = clocks_start();
+	/* Bring up USB HID first so the host can enumerate the mouse early. */
+	err = dongle_usb_init();
 	if (err) {
-		LOG_ERR("clocks_start: %d", err);
+		LOG_ERR("dongle_usb_init: %d", err);
 		return 0;
 	}
 
-	err = esb_initialize();
+	err = dongle_usb_enable();
 	if (err) {
-		LOG_ERR("esb_initialize: %d", err);
-		return 0;
+		LOG_WRN("dongle_usb_enable: %d", err);
 	}
 
-	err = esb_start_rx();
+	/* Bring up the cpurad IPC link that feeds mouse reports. */
+	err = radio_ipc_init();
 	if (err) {
-		LOG_ERR("esb_start_rx: %d", err);
-		return 0;
+		LOG_WRN("radio_ipc_init: %d (no mouse data from radio core)",
+			err);
 	}
-
-	LOG_INF("Listening for ESB packets on channel %u...", DONGLE_ESB_CHANNEL);
 
 	uint32_t prev = 0;
 
 	while (1) {
 		k_sleep(K_SECONDS(1));
 
-		uint32_t now = atomic_get(&rx_count);
+		uint32_t now = atomic_get(&reports_rx);
 
-		LOG_INF("alive: total_rx=%u (+%u/s)", now, now - prev);
+		LOG_INF("alive: hid_tx=%u (+%u/s) dropped=%u",
+			now, now - prev,
+			(unsigned int)atomic_get(&reports_dropped));
 		prev = now;
 	}
 

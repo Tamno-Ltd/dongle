@@ -50,12 +50,12 @@ jobs:
           /opt/zephyr-sdk-0.17.4/setup.sh -t arm-zephyr-eabi -t riscv64-zephyr-elf
           rm zephyr-sdk-0.17.4_linux-x86_64_minimal.tar.xz
 
-      - name: Build cpurad receiver
-        run: west build --pristine=always -b nrf54h20dk/nrf54h20/cpurad dongle
+      - name: Build dongle (cpuapp USB HID + cpurad ESB sysbuild)
+        run: west build --pristine=always --sysbuild -b nrf54h20dk/nrf54h20/cpuapp dongle
 
       - name: Check for forbidden Bluetooth symbols
         run: |
-          if grep -q "CONFIG_BT.*=y" build/dongle/zephyr/.config 2>/dev/null; then
+          if grep -q "CONFIG_BT.*=y" build/dongle/zephyr/.config build/remote_rad/zephyr/.config 2>/dev/null; then
             echo "ERROR: Bluetooth symbols found in build config (ESB-only receiver)"
             exit 1
           fi
@@ -65,10 +65,10 @@ jobs:
 
       - name: Package firmware
         run: |
-          mkdir -p release/dongle/zephyr release/empty_app_core/zephyr release/uicr/zephyr
+          mkdir -p release/dongle/zephyr release/remote_rad/zephyr release/uicr/zephyr
           cp build/dongle/zephyr/zephyr.hex release/dongle/zephyr/
-          cp build/empty_app_core/zephyr/zephyr.hex release/empty_app_core/zephyr/
-          cp build/empty_app_core/zephyr/bicr.hex release/empty_app_core/zephyr/
+          cp build/dongle/zephyr/bicr.hex release/dongle/zephyr/
+          cp build/remote_rad/zephyr/zephyr.hex release/remote_rad/zephyr/
           cp build/uicr/zephyr/uicr.hex release/uicr/zephyr/
           cp build/uicr/zephyr/periphconf.hex release/uicr/zephyr/
           cp build/uicr/zephyr/zephyr.hex release/uicr/zephyr/
