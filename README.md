@@ -92,11 +92,11 @@ terminal/up-buffer 0:
 | cpurad | `remote_rad`     | `0x23001010`      |
 
 Recompute after any change to linker settings, RTT buffer sizes, memory layout,
-or board target:
+or board target — from an NCS toolchain shell (`arm-zephyr-eabi-nm` on `PATH`):
 
 ```cmd
-C:\ncs\toolchains\fd21892d0f\opt\zephyr-sdk\arm-zephyr-eabi\bin\arm-zephyr-eabi-nm.exe -n build\dongle\zephyr\zephyr.elf | findstr _SEGGER_RTT
-C:\ncs\toolchains\fd21892d0f\opt\zephyr-sdk\arm-zephyr-eabi\bin\arm-zephyr-eabi-nm.exe -n build\remote_rad\zephyr\zephyr.elf | findstr _SEGGER_RTT
+arm-zephyr-eabi-nm -n build\dongle\zephyr\zephyr.elf | findstr _SEGGER_RTT
+arm-zephyr-eabi-nm -n build\remote_rad\zephyr\zephyr.elf | findstr _SEGGER_RTT
 ```
 
 Expected cpuapp (`0x2F001010`) output once plugged in and a transmitter is
